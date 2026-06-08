@@ -1,0 +1,162 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: chat_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: chat_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d chat_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+    networks:
+      - chat_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: chat_redis
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    ports:
+      - "6379:6379"
+    networks:
+      - chat_network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: chat_backend
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - chat_network
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: chat_worker
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=4
+    networks:
+      - chat_network
+
+  websocket:
+    build:
+      context: ./websocket-server
+      dockerfile: Dockerfile
+    container_name: chat_websocket
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./websocket-server:/app
+    command: npm run dev
+    networks:
+      - chat_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: chat_frontend
+    depends_on:
+      - backend
+    env_file:
+      - .env
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev
+    networks:
+      - chat_network
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: chat_prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - chat_network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: chat_grafana
+    depends_on:
+      - prometheus
+    environment:
+      - GRAFANA_ADMIN_USER=admin
+      - GRAFANA_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    ports:
+      - "3001:3000"
+    networks:
+      - chat_network
+
+  nginx:
+    image: nginx:alpine
+    container_name: chat_nginx
+    depends_on:
+      - frontend
+      - backend
+      - websocket
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+    networks:
+      - chat_network
+
+volumes:
+  postgres_data:
+  redis_data:
+  grafana_data:
+  prometheus_data:
+
+networks:
+  chat_network:
+    driver: bridge
